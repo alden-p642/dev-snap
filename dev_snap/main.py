@@ -206,6 +206,7 @@ def scan(
         )
 
     console.print(table)
+    console.print("[dim]Legend: [green]+staged[/green]  [yellow]*unstaged[/yellow]  [red]?untracked[/red]  │  [cyan]▲ ahead[/cyan]  [red]▼ behind[/red][/dim]")
     console.print()
 
 if __name__ == "__main__":

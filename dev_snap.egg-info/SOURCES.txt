@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+dev_snap/__init__.py
+dev_snap/main.py
+dev_snap.egg-info/PKG-INFO
+dev_snap.egg-info/SOURCES.txt
+dev_snap.egg-info/dependency_links.txt
+dev_snap.egg-info/entry_points.txt
+dev_snap.egg-info/requires.txt
+dev_snap.egg-info/top_level.txt

@@ -1,0 +1,2 @@
+[console_scripts]
+dev-snap = dev_snap.main:app
