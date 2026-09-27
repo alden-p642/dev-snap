@@ -1,14 +1,20 @@
 from pathlib import Path
 import subprocess
 from typing import Optional, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.columns import Columns
 
-app = typer.Typer(help="dev-snap: Terminal dashboard for local Git workspace activity.")
+app = typer.Typer(help="dev-snap: Fast terminal dashboard for local Git workspace activity.")
 console = Console()
+
+class SortOption(str, Enum):
+    name = "name"
+    recent = "recent"
+    dirty = "dirty"
 
 def run_git_cmd(cmd: List[str], cwd: Path) -> Optional[str]:
     """Execute a Git command safely inside a target directory."""
@@ -27,7 +33,7 @@ def run_git_cmd(cmd: List[str], cwd: Path) -> Optional[str]:
         return None
 
 def analyze_repo(repo_path: Path) -> Dict[str, Any]:
-    """Extract Git status, branch, ahead/behind count, and last commit info."""
+    """Extract Git status, branch, ahead/behind count, and commit info."""
     branch = run_git_cmd(["branch", "--show-current"], repo_path) or "HEAD detached"
 
     status_raw = run_git_cmd(["status", "--porcelain"], repo_path) or ""
@@ -43,10 +49,14 @@ def analyze_repo(repo_path: Path) -> Dict[str, Any]:
         if len(parts) == 2:
             ahead, behind = int(parts[0]), int(parts[1])
 
-    log_info = run_git_cmd(["log", "-1", "--format=%cr|%s"], repo_path)
-    last_commit_time, last_commit_msg = ("No commits yet", "")
+    # Get relative time, subject, and unix timestamp for sorting
+    log_info = run_git_cmd(["log", "-1", "--format=%cr|%s|%ct"], repo_path)
+    last_commit_time, last_commit_msg, commit_epoch = ("No commits yet", "", 0)
     if log_info and "|" in log_info:
-        last_commit_time, last_commit_msg = log_info.split("|", 1)
+        parts = log_info.split("|", 2)
+        last_commit_time = parts[0]
+        last_commit_msg = parts[1]
+        commit_epoch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
 
     is_dirty = (staged > 0) or (unstaged > 0) or (untracked > 0)
 
@@ -59,6 +69,7 @@ def analyze_repo(repo_path: Path) -> Dict[str, Any]:
         "ahead": ahead,
         "behind": behind,
         "is_dirty": is_dirty,
+        "commit_epoch": commit_epoch,
         "last_commit_time": last_commit_time,
         "last_commit_msg": last_commit_msg[:40] + ("..." if len(last_commit_msg) > 40 else ""),
     }
@@ -85,8 +96,14 @@ def scan(
         "-o",
         help="Display only repositories with uncommitted or unpushed changes",
     ),
+    sort: SortOption = typer.Option(
+        SortOption.name,
+        "--sort",
+        "-s",
+        help="Sort results by: name, recent (last commit), or dirty",
+    ),
 ):
-    """Scan workspace directories and display a styled status dashboard."""
+    """Scan workspace directories in parallel and display a styled status dashboard."""
     repos: List[Path] = []
 
     for d in [path] + [p for p in path.glob("*/" * depth) if p.is_dir()]:
@@ -99,7 +116,9 @@ def scan(
         console.print(f"[yellow]No Git repositories discovered under:[/yellow] {path}")
         raise typer.Exit()
 
-    results = [analyze_repo(r) for r in unique_repos]
+    # Parallel repo analysis
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(analyze_repo, unique_repos))
 
     # Metrics
     total_repos = len(results)
@@ -107,7 +126,7 @@ def scan(
     ahead_count = sum(1 for r in results if r["ahead"] > 0)
     behind_count = sum(1 for r in results if r["behind"] > 0)
 
-    # Render workspace metrics banner
+    # Render summary panel
     banner = (
         f"[bold white]Repos:[/bold white] [cyan]{total_repos}[/cyan]  │  "
         f"[bold white]Dirty:[/bold white] [{'red' if dirty_count else 'green'}]{dirty_count}[/{'red' if dirty_count else 'green'}]  │  "
@@ -122,6 +141,14 @@ def scan(
         if not results:
             console.print("[bold green]✨ All repositories are clean and synced![/bold green]\n")
             raise typer.Exit()
+
+    # Sorting
+    if sort == SortOption.recent:
+        results.sort(key=lambda r: r["commit_epoch"], reverse=True)
+    elif sort == SortOption.dirty:
+        results.sort(key=lambda r: (not r["is_dirty"], r["name"].lower()))
+    else:
+        results.sort(key=lambda r: r["name"].lower())
 
     table = Table(
         border_style="bright_black",
