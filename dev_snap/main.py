@@ -1,5 +1,7 @@
 from pathlib import Path
 import subprocess
+import json
+import os
 from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
@@ -49,7 +51,6 @@ def analyze_repo(repo_path: Path) -> Dict[str, Any]:
         if len(parts) == 2:
             ahead, behind = int(parts[0]), int(parts[1])
 
-    # Get relative time, subject, and unix timestamp for sorting
     log_info = run_git_cmd(["log", "-1", "--format=%cr|%s|%ct"], repo_path)
     last_commit_time, last_commit_msg, commit_epoch = ("No commits yet", "", 0)
     if log_info and "|" in log_info:
@@ -62,6 +63,7 @@ def analyze_repo(repo_path: Path) -> Dict[str, Any]:
 
     return {
         "name": repo_path.name,
+        "path": str(repo_path.resolve()),
         "branch": branch,
         "staged": staged,
         "unstaged": unstaged,
@@ -102,6 +104,11 @@ def scan(
         "-s",
         help="Sort results by: name, recent (last commit), or dirty",
     ),
+    as_json: bool = typer.Option(
+        False,
+        "--json",
+        help="Output raw snapshot data formatted as JSON",
+    ),
 ):
     """Scan workspace directories in parallel and display a styled status dashboard."""
     repos: List[Path] = []
@@ -113,20 +120,37 @@ def scan(
     unique_repos = list(dict.fromkeys(repos))
 
     if not unique_repos:
-        console.print(f"[yellow]No Git repositories discovered under:[/yellow] {path}")
+        if as_json:
+            print("[]")
+        else:
+            console.print(f"[yellow]No Git repositories discovered under:[/yellow] {path}")
         raise typer.Exit()
 
-    # Parallel repo analysis
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(analyze_repo, unique_repos))
 
-    # Metrics
+    if dirty_only:
+        results = [r for r in results if r["is_dirty"] or r["ahead"] > 0]
+
+    # Sorting
+    if sort == SortOption.recent:
+        results.sort(key=lambda r: r["commit_epoch"], reverse=True)
+    elif sort == SortOption.dirty:
+        results.sort(key=lambda r: (not r["is_dirty"], r["name"].lower()))
+    else:
+        results.sort(key=lambda r: r["name"].lower())
+
+    # Raw JSON Output
+    if as_json:
+        print(json.dumps(results, indent=2))
+        return
+
+    # Visual Output
     total_repos = len(results)
     dirty_count = sum(1 for r in results if r["is_dirty"])
     ahead_count = sum(1 for r in results if r["ahead"] > 0)
     behind_count = sum(1 for r in results if r["behind"] > 0)
 
-    # Render summary panel
     banner = (
         f"[bold white]Repos:[/bold white] [cyan]{total_repos}[/cyan]  │  "
         f"[bold white]Dirty:[/bold white] [{'red' if dirty_count else 'green'}]{dirty_count}[/{'red' if dirty_count else 'green'}]  │  "
@@ -136,19 +160,9 @@ def scan(
     console.print()
     console.print(Panel(banner, title="[bold cyan]⚡ dev-snap Workspace Overview[/bold cyan]", border_style="cyan"))
 
-    if dirty_only:
-        results = [r for r in results if r["is_dirty"] or r["ahead"] > 0]
-        if not results:
-            console.print("[bold green]✨ All repositories are clean and synced![/bold green]\n")
-            raise typer.Exit()
-
-    # Sorting
-    if sort == SortOption.recent:
-        results.sort(key=lambda r: r["commit_epoch"], reverse=True)
-    elif sort == SortOption.dirty:
-        results.sort(key=lambda r: (not r["is_dirty"], r["name"].lower()))
-    else:
-        results.sort(key=lambda r: r["name"].lower())
+    if dirty_only and not results:
+        console.print("[bold green]✨ All repositories are clean and synced![/bold green]\n")
+        raise typer.Exit()
 
     table = Table(
         border_style="bright_black",
